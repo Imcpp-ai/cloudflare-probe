@@ -77,14 +77,20 @@ jobs:
             # 手动粘贴的节点列表（逗号/换行分隔），透传给脚本 --nodes（脚本会处理 #注释 内的逗号）
             python cloudflare_probe.py \
               --nodes "$NODES" "${COMMON[@]}"
-          elif [ "$GEN" = "0" ]; then
-            # 使用仓库内已有候选列表（results/candidates.txt）
+          elif [ -f nodes.txt ]; then
+            # 自动读取项目根目录的 nodes.txt（定时任务默认走这里）
+            echo ">> 自动读取项目内 nodes.txt"
             python cloudflare_probe.py \
-              --input results/candidates.txt --port 443 "${COMMON[@]}"
-          else
+              --input nodes.txt --port 443 "${COMMON[@]}"
+          elif [ "$GEN" != "0" ]; then
+            # 兜底：从 Cloudflare 官方 IPv4 段采样探测
             python cloudflare_probe.py \
               --generate "$GEN" --ports "$PORTS" \
               --save-candidates results/candidates.txt "${COMMON[@]}"
+          else
+            # GEN=0 且无 nodes.txt：复用上次保存的候选列表
+            python cloudflare_probe.py \
+              --input results/candidates.txt --port 443 "${COMMON[@]}"
           fi
 
       - name: 归档本轮快照（历史）

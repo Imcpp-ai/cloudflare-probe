@@ -24,6 +24,7 @@
 | 文件 | 作用 |
 | --- | --- |
 | `cloudflare_probe.py` | 探测脚本，仅依赖 Python 标准库 |
+| `nodes.txt` | **候选节点列表，定时任务自动读取此文件探测**（维护这个文件即可） |
 | `README.md` | 本文档 |
 | `nodes.example.txt` | 示例候选节点列表（带 `#KR(...)` 附加信息） |
 | `.github/workflows/cf_probe.yml` | GitHub Actions 定时自动化 |
@@ -74,10 +75,15 @@ python cloudflare_probe.py --input nodes.txt \
 
 工作流 `.github/workflows/cf_probe.yml`：
 
-- **定时**：每 6 小时自动运行一次（cron `15 */6 * * *`，UTC）。
+- **定时**：每 6 小时自动运行一次（cron `15 */6 * * *`，UTC），**默认自动读取仓库根目录的 `nodes.txt`** 探测。
+- **候选来源优先级**（每次运行时按以下顺序选择）：
+  1. 手动触发时填的 `nodes` 输入框；
+  2. 仓库内的 `nodes.txt`（存在则自动读取，定时任务默认走这里）；
+  3. `generate` 采样兜底：从 Cloudflare 官方 IPv4 段采样 `generate` 个 IP 探测；
+  4. `generate=0` 时复用上次保存的 `results/candidates.txt`。
 - **手动**：Actions 页面 → Cloudflare 可用节点探测 → Run workflow，可填
-  - `nodes`：直接粘贴要探测的节点列表（逗号/换行分隔，可带 `#注释`），填了就走这批；
-  - `generate`（采样数，填 `0` 改用仓库内 `candidates.txt`）、`ports`、`workers`、`timeout`（仅当 `nodes` 为空时生效）。
+  - `nodes`：临时粘贴要探测的节点列表（逗号/换行分隔，可带 `#注释`）；
+  - `generate`、`ports`、`workers`、`timeout`（`nodes` 为空且无 `nodes.txt` 时生效）。
 
 运行后：
 

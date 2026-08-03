@@ -1,0 +1,13 @@
+# Cloudflare 节点候选列表（GitHub Actions 定时任务自动读取此文件）
+# 每行一个节点：ip 或 ip:port；# 开头为注释；可带 #KR(...) 附加信息，会自动忽略。
+# 只有两段探测都通过的节点才会写进 results/usable_nodes.txt：
+#   第一批：TLS 证书含 www.cloudflare.com；第二批：Host: crypto.cloudflare.com 返回 301。
+# 修改后提交到仓库即可，无需手动触发。
+
+162.159.136.79:443
+104.16.132.229:443
+
+# 之前那批示例（TH/KR 住宅 IP，非 Cloudflare 服务，预计会被第一批过滤）：
+# 171.103.22.35:10616#TH(11.45Mbps,isdatacenter=false,purity=0.0001)
+# 211.37.103.158:11201#KR(56.08Mbps,isdatacenter=false,purity=0.0002)
+# 14.37.84.94:11090#KR(52.13Mbps,isdatacenter=false,purity=0.0009)
