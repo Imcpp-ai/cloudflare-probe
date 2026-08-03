@@ -272,8 +272,12 @@ def load_nodes(path: str, default_port: int, ports: list,
     - `ip` / `ip:port`：作为单节点（无端口时用 default_port）
     - `cidr` / `cidr:port`：网段内采样（无行内端口时用 ports 列表）
     - `AS13335`：拉取该 ASN 公告前缀并采样，端口用 ports 列表
+    - 行内空白（Tab/空格）后的说明会被丢弃，因此
+      `104.16.0.0/13<tab>运营商<tab>地区` 这类带备注的格式可直接使用
+    - 文件内 CIDR/ASN 展开的 IP 共用 max_ips 采样上限
     """
     nodes = []
+    expanded_ips = []
     cidr_re = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})(?::(\d+))?$")
     asn_re = re.compile(r"^AS(\d+)$", re.IGNORECASE)
     with open(path, encoding="utf-8") as f:
@@ -281,31 +285,36 @@ def load_nodes(path: str, default_port: int, ports: list,
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue
-            line = line.split("#", 1)[0].strip()  # 去掉 # 后的附加信息
+            line = line.split(None, 1)[0]  # 丢弃空白后的说明（cidr<TAB>描述<TAB>国家）
+            line = line.split("#", 1)[0].strip()  # 再去掉 # 后的附加信息
             if not line:
                 continue
             m = asn_re.match(line)
             if m:
                 try:
-                    ips = []
                     for c in fetch_asn_prefixes(m.group(1), timeout):
-                        ips.extend(sample_from_cidr(c, rng))
-                    ips = sorted(set(ips))
-                    rng.shuffle(ips)
-                    ips = ips[:max(1, max_ips)]
-                    nodes.extend((ip, p) for ip in ips for p in ports)
+                        expanded_ips.extend(sample_from_cidr(c, rng))
                 except Exception as exc:
                     print("[!] 文件内 AS%s 前缀拉取失败（%s），跳过"
                           % (m.group(1), exc.__class__.__name__))
                 continue
             m = cidr_re.match(line)
             if m:
-                ps = [int(m.group(2))] if m.group(2) else ports
-                nodes.extend((ip, p) for ip in sample_from_cidr(m.group(1), rng) for p in ps)
+                ips = sample_from_cidr(m.group(1), rng)
+                if m.group(2):
+                    # 行内指定了端口：该网段只探这个端口（单独受 max_ips 约束）
+                    nodes.extend((ip, int(m.group(2))) for ip in ips[:max(1, max_ips)])
+                else:
+                    expanded_ips.extend(ips)
                 continue
             n = parse_node(line, default_port)
             if n:
                 nodes.append(n)
+    # 无行内端口的 CIDR/ASN 行：展开 IP 全局截断到 max_ips 后乘端口列表
+    expanded_ips = sorted(set(expanded_ips))
+    rng.shuffle(expanded_ips)
+    expanded_ips = expanded_ips[:max(1, max_ips)]
+    nodes.extend((ip, p) for ip in expanded_ips for p in ports)
     return nodes
 
 
