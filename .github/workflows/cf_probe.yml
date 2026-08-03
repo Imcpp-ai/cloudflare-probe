@@ -17,9 +17,17 @@ on:
         required: false
         default: "2000"
       ports:
-        description: "探测端口，逗号分隔"
+        description: "探测端口，支持单个、逗号分隔与范围，如 443 或 443,2053,2083-2087"
         required: false
         default: "443"
+      cidr:
+        description: "按 CIDR 采样候选（逗号分隔，如 104.16.0.0/13,172.64.0.0/13）。填了会展开并参与探测"
+        required: false
+        default: ""
+      asn:
+        description: "按 ASN 拉取公告前缀采样候选（逗号分隔，如 13335,15169）。填了会展开并参与探测"
+        required: false
+        default: ""
       workers:
         description: "并发数"
         required: false
@@ -56,6 +64,8 @@ jobs:
           NODES_INPUT: ${{ inputs.nodes }}
           GEN_INPUT: ${{ inputs.generate }}
           PORTS_INPUT: ${{ inputs.ports }}
+          CIDR_INPUT: ${{ inputs.cidr }}
+          ASN_INPUT: ${{ inputs.asn }}
           WORKERS_INPUT: ${{ inputs.workers }}
           TIMEOUT_INPUT: ${{ inputs.timeout }}
         run: |
@@ -66,7 +76,10 @@ jobs:
           WORKERS="${WORKERS_INPUT:-200}"
           TIMEOUT="${TIMEOUT_INPUT:-5}"
           NODES="${NODES_INPUT}"
-          echo ">> generate=$GEN ports=$PORTS workers=$WORKERS timeout=${TIMEOUT}s nodes=${NODES:0:60}..."
+          CIDR="${CIDR_INPUT}"
+          ASN="${ASN_INPUT}"
+          echo ">> generate=$GEN ports=$PORTS workers=$WORKERS timeout=${TIMEOUT}s"
+          echo ">> nodes=${NODES:0:60}... cidr=${CIDR:0:60}... asn=${ASN:0:60}..."
 
           COMMON=(--out results/usable_nodes.txt
                   --report results/probe_report.txt
@@ -77,11 +90,17 @@ jobs:
             # 手动粘贴的节点列表（逗号/换行分隔），透传给脚本 --nodes（脚本会处理 #注释 内的逗号）
             python cloudflare_probe.py \
               --nodes "$NODES" "${COMMON[@]}"
+          elif [ -n "$CIDR" ] || [ -n "$ASN" ]; then
+            # 手动指定 CIDR / ASN：展开采样后探测（端口范围由 --ports 传入）
+            echo ">> 按 CIDR/ASN 展开候选"
+            python cloudflare_probe.py \
+              --cidr "$CIDR" --asn "$ASN" --ports "$PORTS" \
+              --save-candidates results/candidates.txt "${COMMON[@]}"
           elif [ -f nodes.txt ]; then
             # 自动读取项目根目录的 nodes.txt（定时任务默认走这里）
             echo ">> 自动读取项目内 nodes.txt"
             python cloudflare_probe.py \
-              --input nodes.txt --port 443 "${COMMON[@]}"
+              --input nodes.txt --port 443 --ports "$PORTS" "${COMMON[@]}"
           elif [ "$GEN" != "0" ]; then
             # 兜底：从 Cloudflare 官方 IPv4 段采样探测
             python cloudflare_probe.py \

@@ -30,6 +30,10 @@
 | `.github/workflows/cf_probe.yml` | GitHub Actions 定时自动化 |
 | `.gitignore` | 忽略 `results/`、`__pycache__/` |
 
+> `nodes.txt` 每行支持 4 种写法：
+> `ip`、`ip:port`（也可带 `#注释`）、`cidr`（如 `104.16.0.0/13`，网段内采样、
+> 端口取手动触发时的 `ports`）、以及 `AS13335`（自动拉取该 ASN 的公告前缀并采样）。
+
 ## 本地运行
 
 ```bash
@@ -43,7 +47,14 @@ python cloudflare_probe.py \
 # 3) 自动从 Cloudflare 官方 IP 段采样 2000 个候选 IP，探测 443/2053 两个端口
 python cloudflare_probe.py --generate 2000 --ports 443,2053 --workers 200
 
-# 4) 完整参数
+# 4) 按 CIDR 采样探测，端口支持范围写法（443、2053、2083~2087）
+python cloudflare_probe.py --cidr 104.16.0.0/13,172.64.0.0/13 \
+    --ports 443,2053,2083-2087 --max-ips 1000
+
+# 5) 按 ASN 拉取公告前缀采样探测（13335 = Cloudflare）
+python cloudflare_probe.py --asn 13335 --ports 443,2053 --max-ips 500
+
+# 6) 完整参数
 python cloudflare_probe.py --input nodes.txt \
     --out usable_nodes.txt --report probe_report.txt \
     --workers 200 --timeout 5 \
@@ -53,15 +64,22 @@ python cloudflare_probe.py --input nodes.txt \
 > **非标端口**：端口不限 443，`ip:port` 里写什么就探什么
 > （如 `171.103.22.35:10616`）。列表带 `#KR(...)` 之类附加信息的可直接粘贴，
 > 解析时 `#` 之后的内容会被自动丢弃，注释括号内的逗号不会误拆。
+>
+> **ASN / CIDR / 端口范围**：`--asn`、`--cidr` 会先展开成候选节点再走两段式探测；
+> `--ports` 支持 `443,2053,2083-2087` 这样的范围写法。
+> 候选文件里也可以直接写 `cidr` / `AS13335` 行（见上方说明）。
 
 常用参数：
 
 | 参数 | 说明 | 默认 |
 | --- | --- | --- |
-| `--input FILE` | 候选节点文件 | 与 `--generate` 二选一 |
-| `--nodes LIST` | 直接粘贴节点列表（逗号/换行分隔），优先于其余方式 | — |
+| `--input FILE` | 候选节点文件 | 与其余方式可组合 |
+| `--nodes LIST` | 直接粘贴节点列表（逗号/换行分隔） | — |
 | `--generate N` | 从 Cloudflare 官方 IPv4 段采样 N 个 IP 作为候选 | — |
-| `--ports` | 生成模式下的端口，逗号分隔 | `443` |
+| `--cidr` | 按 CIDR 采样候选，逗号分隔（如 `104.16.0.0/13`） | — |
+| `--asn` | 按 ASN 拉取公告前缀采样候选（如 `13335`） | — |
+| `--max-ips` | `--cidr` / `--asn` 展开时的采样 IP 上限 | `2000` |
+| `--ports` | 生成/展开模式的端口，支持 `443,2053,2083-2087` 范围 | `443` |
 | `--port` | 输入文件中无端口时的默认端口 | `443` |
 | `--out FILE` | 可用节点输出（每行 `ip:port`） | `usable_nodes.txt` |
 | `--report FILE` | 全部节点两段探测明细 | `probe_report.txt` |
@@ -78,12 +96,15 @@ python cloudflare_probe.py --input nodes.txt \
 - **定时**：每 6 小时自动运行一次（cron `15 */6 * * *`，UTC），**默认自动读取仓库根目录的 `nodes.txt`** 探测。
 - **候选来源优先级**（每次运行时按以下顺序选择）：
   1. 手动触发时填的 `nodes` 输入框；
-  2. 仓库内的 `nodes.txt`（存在则自动读取，定时任务默认走这里）；
-  3. `generate` 采样兜底：从 Cloudflare 官方 IPv4 段采样 `generate` 个 IP 探测；
-  4. `generate=0` 时复用上次保存的 `results/candidates.txt`。
+  2. 手动触发时填的 `cidr` / `asn` 输入框（展开采样后探测）；
+  3. 仓库内的 `nodes.txt`（存在则自动读取，定时任务默认走这里）；
+  4. `generate` 采样兜底：从 Cloudflare 官方 IPv4 段采样 `generate` 个 IP 探测；
+  5. `generate=0` 时复用上次保存的 `results/candidates.txt`。
 - **手动**：Actions 页面 → Cloudflare 可用节点探测 → Run workflow，可填
   - `nodes`：临时粘贴要探测的节点列表（逗号/换行分隔，可带 `#注释`）；
-  - `generate`、`ports`、`workers`、`timeout`（`nodes` 为空且无 `nodes.txt` 时生效）。
+  - `cidr`：临时指定网段，如 `104.16.0.0/13,172.64.0.0/13`；
+  - `asn`：临时指定自治域，如 `13335`；
+  - `generate`、`ports`（支持范围如 `443,2053,2083-2087`）、`workers`、`timeout`。
 
 运行后：
 

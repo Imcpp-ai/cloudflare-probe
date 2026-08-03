@@ -20,14 +20,24 @@ Cloudflare 可用节点两段式探测脚本
 
 仅依赖 Python 标准库，无需安装第三方包，可直接在 GitHub Actions 中运行。
 
+候选来源支持四种：--input 文件、--nodes 粘贴列表、--cidr 网段、--asn 自治域；
+端口支持单个、逗号分隔与范围（如 443,2053,2083-2087）。
+
 用法示例：
-  # 1) 从候选文件探测（每行 ip 或 ip:port，# 开头为注释）
+  # 1) 从候选文件探测（每行 ip、ip:port、cidr、cidr:port 或 ASxxx，# 开头为注释）
   python cloudflare_probe.py --input nodes.txt
 
   # 2) 自动从 Cloudflare 官方 IP 段采样候选并探测
   python cloudflare_probe.py --generate 2000 --ports 443,2053,2083 --workers 200
 
-  # 3) 完整参数
+  # 3) 按 CIDR 采样探测，端口支持范围写法
+  python cloudflare_probe.py --cidr 104.16.0.0/13,172.64.0.0/13 \
+      --ports 443,2053,2083-2087 --max-ips 1000
+
+  # 4) 按 ASN 拉取公告前缀采样探测（13335 = Cloudflare）
+  python cloudflare_probe.py --asn 13335 --ports 443,2053 --max-ips 500
+
+  # 5) 完整参数
   python cloudflare_probe.py --input nodes.txt --port 443 \
       --out usable_nodes.txt --report probe_report.txt \
       --workers 200 --timeout 5 \
@@ -36,6 +46,7 @@ Cloudflare 可用节点两段式探测脚本
 
 import argparse
 import concurrent.futures
+import json
 import os
 import random
 import re
@@ -174,10 +185,124 @@ def parse_node(line: str, default_port: int):
     return line, default_port
 
 
-def load_nodes(path: str, default_port: int):
+def parse_ports(spec: str) -> list:
+    """解析端口列表，支持单个、逗号分隔与范围：`443,2053,2083-2087`。"""
+    ports = []
+    for part in spec.replace("，", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, _, b = part.partition("-")
+            if a.isdigit() and b.isdigit():
+                lo, hi = int(a), int(b)
+                if 1 <= lo <= hi <= 65535:
+                    ports.extend(range(lo, hi + 1))
+                    continue
+            raise ValueError("非法端口范围: %r" % part)
+        if part.isdigit():
+            p = int(part)
+            if 1 <= p <= 65535:
+                ports.append(p)
+                continue
+            raise ValueError("非法端口: %r" % part)
+    ports = sorted(set(ports))
+    return ports or [443]
+
+
+# RIPEStat 公告前缀接口：免费、无需 Key，返回该 ASN 当前广播的 IPv4/IPv6 前缀
+ASN_PREFIX_API = "https://stat.ripe.net/data/announced-prefixes/data.json?resource=AS%s"
+
+
+def fetch_asn_prefixes(asn: str, timeout: float) -> list:
+    """拉取指定 ASN 公告的 IPv4 前缀列表（仅标准库）。"""
+    with urllib.request.urlopen(ASN_PREFIX_API % asn, timeout=timeout) as r:
+        data = json.loads(r.read().decode("utf-8"))
+    prefixes = data.get("data", {}).get("prefixes", []) or []
+    return [p.get("prefix", "") for p in prefixes if ":" not in p.get("prefix", "")]
+
+
+def expand_cidr_spec(spec: str, ports: list, max_ips: int, rng: random.Random) -> list:
+    """把 `cidr1,cidr2`（如 104.16.0.0/13,172.64.0.0/13）展开成 (ip, port) 候选。"""
+    ips = []
+    for part in spec.replace("，", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            ips.extend(sample_from_cidr(part, rng))
+        except (ValueError, IndexError):
+            print("[!] 跳过非法 CIDR: %s" % part)
+    ips = sorted(set(ips))
+    rng.shuffle(ips)
+    ips = ips[:max(1, max_ips)]
+    return [(ip, port) for ip in ips for port in ports]
+
+
+def expand_asn_spec(spec: str, ports: list, max_ips: int, timeout: float,
+                    rng: random.Random) -> list:
+    """把 `13335` 或 `AS13335,15169` 展开成 (ip, port) 候选（去 AS 前缀可省略）。"""
+    ips = []
+    for part in spec.replace("，", ",").split(","):
+        asn = re.sub(r"^[Aa][Ss]", "", part.strip())
+        if not asn.isdigit():
+            print("[!] 跳过非法 ASN: %s" % part)
+            continue
+        try:
+            prefixes = fetch_asn_prefixes(asn, timeout)
+        except Exception as exc:
+            print("[!] AS%s 前缀拉取失败（%s: %s），跳过" % (asn, exc.__class__.__name__, exc))
+            continue
+        print("[*] AS%s 广播 %d 个 IPv4 前缀" % (asn, len(prefixes)))
+        for c in prefixes:
+            try:
+                ips.extend(sample_from_cidr(c, rng))
+            except (ValueError, IndexError):
+                pass
+    ips = sorted(set(ips))
+    rng.shuffle(ips)
+    ips = ips[:max(1, max_ips)]
+    return [(ip, port) for ip in ips for port in ports]
+
+
+def load_nodes(path: str, default_port: int, ports: list,
+               max_ips: int, timeout: float, rng: random.Random) -> list:
+    """读取候选文件：支持 ip、ip:port、cidr、cidr:port、ASxxx 行。
+
+    - `ip` / `ip:port`：作为单节点（无端口时用 default_port）
+    - `cidr` / `cidr:port`：网段内采样（无行内端口时用 ports 列表）
+    - `AS13335`：拉取该 ASN 公告前缀并采样，端口用 ports 列表
+    """
     nodes = []
+    cidr_re = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3}/\d{1,2})(?::(\d+))?$")
+    asn_re = re.compile(r"^AS(\d+)$", re.IGNORECASE)
     with open(path, encoding="utf-8") as f:
-        for line in f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            line = line.split("#", 1)[0].strip()  # 去掉 # 后的附加信息
+            if not line:
+                continue
+            m = asn_re.match(line)
+            if m:
+                try:
+                    ips = []
+                    for c in fetch_asn_prefixes(m.group(1), timeout):
+                        ips.extend(sample_from_cidr(c, rng))
+                    ips = sorted(set(ips))
+                    rng.shuffle(ips)
+                    ips = ips[:max(1, max_ips)]
+                    nodes.extend((ip, p) for ip in ips for p in ports)
+                except Exception as exc:
+                    print("[!] 文件内 AS%s 前缀拉取失败（%s），跳过"
+                          % (m.group(1), exc.__class__.__name__))
+                continue
+            m = cidr_re.match(line)
+            if m:
+                ps = [int(m.group(2))] if m.group(2) else ports
+                nodes.extend((ip, p) for ip in sample_from_cidr(m.group(1), rng) for p in ps)
+                continue
             n = parse_node(line, default_port)
             if n:
                 nodes.append(n)
@@ -258,9 +383,15 @@ def main():
                     help="直接指定节点列表，逗号分隔，如 'ip:port,ip2:port2#注释'"
                          "（优先于 --input / --generate）")
     ap.add_argument("--generate", type=int, metavar="N",
-                    help="从 Cloudflare 官方 IP 段采样 N 个候选 IP 并探测（不填端口时用 --ports）")
+                    help="从 Cloudflare 官方 IP 段采样 N 个候选 IP 并探测（端口用 --ports）")
+    ap.add_argument("--cidr",
+                    help="按 CIDR 采样，逗号分隔，如 104.16.0.0/13,172.64.0.0/13（端口用 --ports）")
+    ap.add_argument("--asn",
+                    help="按 ASN 拉取公告前缀采样，逗号分隔，如 13335,15169（AS 前缀可省略）")
+    ap.add_argument("--max-ips", type=int, default=2000,
+                    help="CIDR/ASN 展开时的采样 IP 上限（默认 2000）")
     ap.add_argument("--ports", default="443",
-                    help="生成模式使用的探测端口，逗号分隔（默认 443）")
+                    help="生成/展开模式的探测端口，支持单个、逗号分隔与范围，如 443,2053,2083-2087")
     ap.add_argument("--port", type=int, default=443,
                     help="输入文件里无端口时的默认端口（默认 443）")
     ap.add_argument("--out", default="usable_nodes.txt",
@@ -281,26 +412,39 @@ def main():
     ap.add_argument("--quiet", action="store_true", help="不逐条打印结果")
     args = ap.parse_args()
 
-    ports = [int(p) for p in args.ports.split(",") if p.strip().isdigit()] or [443]
+    try:
+        ports = parse_ports(args.ports)
+    except ValueError as exc:
+        ap.error(str(exc))
+    rng = random.Random()
 
+    nodes = []
     if args.nodes:
-        nodes = [n for part in split_nodes(args.nodes)
-                 if (n := parse_node(part, args.port))]
-    elif args.generate:
+        nodes += [n for part in split_nodes(args.nodes)
+                  if (n := parse_node(part, args.port))]
+    if args.input:
+        nodes += load_nodes(args.input, args.port, ports, args.max_ips, args.timeout, rng)
+    if args.cidr:
+        cids = expand_cidr_spec(args.cidr, ports, args.max_ips, rng)
+        print("[*] CIDR 展开 %d 个候选节点" % len(cids))
+        nodes += cids
+    if args.asn:
+        asns = expand_asn_spec(args.asn, ports, args.max_ips, args.timeout, rng)
+        print("[*] ASN 展开 %d 个候选节点" % len(asns))
+        nodes += asns
+    if not nodes and args.generate:
         nodes, cidrs = generate_nodes(args.generate, ports, args.timeout)
         print("[*] 已从 %d 个 CIDR 采样 %d 个候选节点" % (len(cidrs), len(nodes)))
-        if args.save_candidates:
-            ensure_dir(args.save_candidates)
-            with open(args.save_candidates, "w", encoding="utf-8") as f:
-                for ip, port in nodes:
-                    f.write("%s:%d\n" % (ip, port))
-            print("[*] 候选节点已写入 %s" % args.save_candidates)
-    elif args.input:
-        nodes = load_nodes(args.input, args.port)
-    else:
-        ap.error("请用 --input 指定候选文件，或用 --generate 采样生成")
+    if not nodes:
+        ap.error("请用 --input / --nodes / --cidr / --asn 指定候选，或用 --generate 采样生成")
 
     nodes = list(dict.fromkeys(nodes))
+    if args.save_candidates:
+        ensure_dir(args.save_candidates)
+        with open(args.save_candidates, "w", encoding="utf-8") as f:
+            for ip, port in nodes:
+                f.write("%s:%d\n" % (ip, port))
+        print("[*] 候选节点已写入 %s" % args.save_candidates)
     print("[*] 待探测节点 %d 个，并发 %d，超时 %.1fs" % (len(nodes), args.workers, args.timeout))
     if not nodes:
         print("[!] 没有可探测的节点，退出")
