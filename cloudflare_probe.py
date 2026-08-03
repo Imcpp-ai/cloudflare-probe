@@ -222,13 +222,27 @@ def fetch_asn_prefixes(asn: str, timeout: float) -> list:
     return [p.get("prefix", "") for p in prefixes if ":" not in p.get("prefix", "")]
 
 
+def split_spec_tokens(spec: str) -> list:
+    """把 CIDR/ASN 输入拆成 token 列表。
+
+    兼容逗号、换行、中文逗号、Tab/空格分隔；每行若带说明
+    （如 `cidr<tab>运营商<tab>地区`）只取首列，方便直接整份粘贴列表。
+    """
+    tokens = []
+    for chunk in re.split(r"[\n,，;]", spec):
+        head = chunk.strip().split(None, 1)[0] if chunk.strip() else ""
+        if head:
+            tokens.append(head)
+    return tokens
+
+
 def expand_cidr_spec(spec: str, ports: list, max_ips: int, rng: random.Random) -> list:
-    """把 `cidr1,cidr2`（如 104.16.0.0/13,172.64.0.0/13）展开成 (ip, port) 候选。"""
+    """把 `cidr1,cidr2`（如 104.16.0.0/13,172.64.0.0/13）展开成 (ip, port) 候选。
+
+    支持整份粘贴：逗号/换行/Tab 分隔、带说明的行（取首列 CIDR）。
+    """
     ips = []
-    for part in spec.replace("，", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
+    for part in split_spec_tokens(spec):
         try:
             ips.extend(sample_from_cidr(part, rng))
         except (ValueError, IndexError):
@@ -241,10 +255,13 @@ def expand_cidr_spec(spec: str, ports: list, max_ips: int, rng: random.Random) -
 
 def expand_asn_spec(spec: str, ports: list, max_ips: int, timeout: float,
                     rng: random.Random) -> list:
-    """把 `13335` 或 `AS13335,15169` 展开成 (ip, port) 候选（去 AS 前缀可省略）。"""
+    """把 `13335` 或 `AS13335,15169` 展开成 (ip, port) 候选（去 AS 前缀可省略）。
+
+    支持整份粘贴：逗号/换行/Tab 分隔。
+    """
     ips = []
-    for part in spec.replace("，", ",").split(","):
-        asn = re.sub(r"^[Aa][Ss]", "", part.strip())
+    for part in split_spec_tokens(spec):
+        asn = re.sub(r"^[Aa][Ss]", "", part)
         if not asn.isdigit():
             print("[!] 跳过非法 ASN: %s" % part)
             continue
