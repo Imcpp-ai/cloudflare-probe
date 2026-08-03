@@ -1,0 +1,7 @@
+171.103.22.35:10616#TH(11.45Mbps,isdatacenter=false,purity=0.0001)
+171.103.93.107:10911#TH(0.00Mbps,isdatacenter=false,purity=0.0001)
+110.12.52.95:17000#KR(36.70Mbps,isdatacenter=false,purity=0.0002)
+211.37.103.158:11201#KR(56.08Mbps,isdatacenter=false,purity=0.0002)
+121.140.34.163:12300#KR(9.51Mbps,isdatacenter=false,purity=0.0009)
+121.190.133.107:14000#KR(43.44Mbps,isdatacenter=false,purity=0.0009)
+14.37.84.94:11090#KR(52.13Mbps,isdatacenter=false,purity=0.0009)

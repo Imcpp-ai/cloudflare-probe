@@ -1,0 +1,109 @@
+name: Cloudflare 可用节点探测
+
+# 触发方式：
+#   1) 每 6 小时自动运行一次（cron 为 UTC 时间，避开整点）
+#   2) 可在 Actions 页面手动触发并自定义参数
+on:
+  schedule:
+    - cron: "15 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      nodes:
+        description: "直接粘贴节点列表（逗号或换行分隔，如 1.2.3.4:443,5.6.7.8:2053）。填了就不走采样，优先探测这批"
+        required: false
+        default: ""
+      generate:
+        description: "采样候选 IP 数量（填 0 表示关闭采样，改用仓库内 candidates.txt）"
+        required: false
+        default: "2000"
+      ports:
+        description: "探测端口，逗号分隔"
+        required: false
+        default: "443"
+      workers:
+        description: "并发数"
+        required: false
+        default: "200"
+      timeout:
+        description: "单节点每段探测超时（秒）"
+        required: false
+        default: "5"
+
+permissions:
+  contents: write   # 允许把结果推送回仓库分支
+
+jobs:
+  probe:
+    name: 两段式探测并输出可用节点
+    runs-on: ubuntu-latest
+    concurrency:
+      group: cf-probe
+      cancel-in-progress: false
+
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 安装 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 定时触发时 workflow_dispatch 的 inputs 为空，这里补默认值
+      - name: 运行两段式探测脚本
+        run: |
+          set -e
+          mkdir -p results
+          GEN="${{ inputs.generate }}";    GEN="${GEN:-2000}"
+          PORTS="${{ inputs.ports }}";     PORTS="${PORTS:-443}"
+          WORKERS="${{ inputs.workers }}"; WORKERS="${WORKERS:-200}"
+          TIMEOUT="${{ inputs.timeout }}"; TIMEOUT="${TIMEOUT:-5}"
+          NODES="${{ inputs.nodes }}"
+          echo ">> generate=$GEN ports=$PORTS workers=$WORKERS timeout=${TIMEOUT}s nodes=${NODES:0:60}..."
+
+          COMMON=(--out results/usable_nodes.txt
+                  --report results/probe_report.txt
+                  --workers "$WORKERS" --timeout "$TIMEOUT"
+                  --probe-host crypto.cloudflare.com --expect-code 301 --scheme https)
+
+          if [ -n "$NODES" ]; then
+            # 手动粘贴的节点列表，透传给脚本 --nodes（脚本会处理 #注释 内的逗号）
+            python cloudflare_probe.py \
+              --nodes "$NODES" "${COMMON[@]}"
+          elif [ "$GEN" = "0" ]; then
+            # 使用仓库内已有候选列表（results/candidates.txt）
+            python cloudflare_probe.py \
+              --input results/candidates.txt --port 443 "${COMMON[@]}"
+          else
+            python cloudflare_probe.py \
+              --generate "$GEN" --ports "$PORTS" \
+              --save-candidates results/candidates.txt "${COMMON[@]}"
+          fi
+
+      - name: 归档本轮快照（历史）
+        run: |
+          mkdir -p results/history
+          ts=$(date -u +%Y%m%d%H%M)
+          cp results/usable_nodes.txt results/history/usable_$ts.txt || true
+
+      - name: 上传探测结果（Artifact）
+        uses: actions/upload-artifact@v4
+        with:
+          name: cf-probe-results
+          path: results/
+          if-no-files-found: error
+
+      - name: 提交结果到 cf-probe-results 分支
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # results/ 目录已加入 .gitignore，结果只提交到独立分支，避免污染主分支
+          git add -f results/usable_nodes.txt \
+                  results/probe_report.txt
+          [ -f results/candidates.txt ] \
+            && git add -f results/candidates.txt || true
+          git commit -m "更新 Cloudflare 可用节点 $(date -u +'%Y-%m-%d %H:%M UTC')" || echo "无变更，跳过提交"
+          git push origin HEAD:cf-probe-results --force \
+            || echo "推送失败（分支可能受保护），结果已保存在 Artifact 中"
