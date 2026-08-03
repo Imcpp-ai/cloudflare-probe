@@ -49,16 +49,23 @@ jobs:
         with:
           python-version: "3.12"
 
-      # 定时触发时 workflow_dispatch 的 inputs 为空，这里补默认值
+      # 定时触发时 workflow_dispatch 的 inputs 为空，这里补默认值。
+      # 输入经 env 传入，避免多行节点列表在 bash 里被断行。
       - name: 运行两段式探测脚本
+        env:
+          NODES_INPUT: ${{ inputs.nodes }}
+          GEN_INPUT: ${{ inputs.generate }}
+          PORTS_INPUT: ${{ inputs.ports }}
+          WORKERS_INPUT: ${{ inputs.workers }}
+          TIMEOUT_INPUT: ${{ inputs.timeout }}
         run: |
           set -e
           mkdir -p results
-          GEN="${{ inputs.generate }}";    GEN="${GEN:-2000}"
-          PORTS="${{ inputs.ports }}";     PORTS="${PORTS:-443}"
-          WORKERS="${{ inputs.workers }}"; WORKERS="${WORKERS:-200}"
-          TIMEOUT="${{ inputs.timeout }}"; TIMEOUT="${TIMEOUT:-5}"
-          NODES="${{ inputs.nodes }}"
+          GEN="${GEN_INPUT:-2000}"
+          PORTS="${PORTS_INPUT:-443}"
+          WORKERS="${WORKERS_INPUT:-200}"
+          TIMEOUT="${TIMEOUT_INPUT:-5}"
+          NODES="${NODES_INPUT}"
           echo ">> generate=$GEN ports=$PORTS workers=$WORKERS timeout=${TIMEOUT}s nodes=${NODES:0:60}..."
 
           COMMON=(--out results/usable_nodes.txt
@@ -67,7 +74,7 @@ jobs:
                   --probe-host crypto.cloudflare.com --expect-code 301 --scheme https)
 
           if [ -n "$NODES" ]; then
-            # 手动粘贴的节点列表，透传给脚本 --nodes（脚本会处理 #注释 内的逗号）
+            # 手动粘贴的节点列表（逗号/换行分隔），透传给脚本 --nodes（脚本会处理 #注释 内的逗号）
             python cloudflare_probe.py \
               --nodes "$NODES" "${COMMON[@]}"
           elif [ "$GEN" = "0" ]; then
