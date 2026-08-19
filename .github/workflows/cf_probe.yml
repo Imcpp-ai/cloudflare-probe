@@ -4,8 +4,6 @@ name: Cloudflare 可用节点探测
 #   1) 每 6 小时自动运行一次（cron 为 UTC 时间，避开整点）
 #   2) 可在 Actions 页面手动触发并自定义参数
 on:
-  schedule:
-    - cron: "15 */6 * * *"
   workflow_dispatch:
     inputs:
       nodes:
